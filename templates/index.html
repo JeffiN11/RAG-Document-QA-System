@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RAG Document QA</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: sans-serif; background: #f5f5f5; display: flex; justify-content: center; padding: 40px 16px; }
+        .container { background: white; border-radius: 12px; padding: 32px; max-width: 680px; width: 100%; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+        h1 { font-size: 22px; margin-bottom: 8px; }
+        p.sub { color: #666; font-size: 14px; margin-bottom: 24px; }
+        .section { margin-bottom: 24px; }
+        label { font-size: 13px; font-weight: 500; display: block; margin-bottom: 6px; }
+        input[type=file] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; }
+        input[type=text] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; }
+        button { background: #1a1a1a; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-size: 14px; cursor: pointer; margin-top: 8px; }
+        button:hover { background: #333; }
+        .answer-box { background: #f9f9f9; border: 1px solid #eee; border-radius: 8px; padding: 16px; font-size: 14px; line-height: 1.6; min-height: 60px; margin-top: 12px; color: #333; }
+        .status { font-size: 13px; color: #888; margin-top: 8px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>RAG Document QA System</h1>
+    <p class="sub">Upload a PDF and ask questions about it using AI.</p>
+
+    <div class="section">
+        <label>1. Upload a PDF</label>
+        <input type="file" id="pdfFile" accept=".pdf" />
+        <button onclick="uploadPDF()">Upload & Process</button>
+        <div class="status" id="uploadStatus"></div>
+    </div>
+
+    <div class="section">
+        <label>2. Ask a question</label>
+        <input type="text" id="question" placeholder="e.g. What is this document about?" />
+        <button onclick="askQuestion()">Ask</button>
+        <div class="answer-box" id="answerBox">Your answer will appear here...</div>
+    </div>
+</div>
+
+<script>
+async function uploadPDF() {
+    const file = document.getElementById("pdfFile").files[0];
+    if (!file) return alert("Please select a PDF file.");
+    const status = document.getElementById("uploadStatus");
+    status.textContent = "Uploading and processing...";
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch("/upload", { method: "POST", body: formData });
+    const data = await res.json();
+    status.textContent = data.message;
+}
+
+async function askQuestion() {
+    const question = document.getElementById("question").value;
+    if (!question) return alert("Please enter a question.");
+    const box = document.getElementById("answerBox");
+    box.textContent = "Thinking...";
+    const res = await fetch("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question })
+    });
+    const data = await res.json();
+    box.textContent = data.answer;
+}
+</script>
+</body>
+</html>
