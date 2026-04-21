@@ -1,4 +1,99 @@
-<!DOCTYPE html>
+import os
+
+files = {
+    "rag.py": '''from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.chains import RetrievalQA
+from langchain_community.llms import Ollama
+import os
+
+VECTOR_STORE_PATH = "vectorstore"
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+def process_pdfs(file_paths: list):
+    all_chunks = []
+    for file_path in file_paths:
+        loader = PyPDFLoader(file_path)
+        documents = loader.load()
+        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        chunks = splitter.split_documents(documents)
+        all_chunks.extend(chunks)
+    vectorstore = FAISS.from_documents(all_chunks, embeddings)
+    vectorstore.save_local(VECTOR_STORE_PATH)
+    return len(all_chunks)
+
+def answer_question(question: str, chat_history: list):
+    if not os.path.exists(VECTOR_STORE_PATH):
+        return {"answer": "No document uploaded yet. Please upload a PDF first.", "sources": []}
+    vectorstore = FAISS.load_local(VECTOR_STORE_PATH, embeddings, allow_dangerous_deserialization=True)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+    docs = retriever.invoke(question)
+    context = "\\n\\n".join([d.page_content for d in docs])
+    history_text = ""
+    for msg in chat_history[-4:]:
+        history_text += f"User: {msg[\'user\']}\\nAssistant: {msg[\'assistant\']}\\n"
+    prompt = f"{history_text}Context:\\n{context}\\n\\nQuestion: {question}\\nAnswer:"
+    llm = Ollama(model="llama3.2")
+    answer = llm.invoke(prompt)
+    sources = []
+    for doc in docs:
+        meta = doc.metadata
+        sources.append({
+            "page": meta.get("page", "?") + 1 if isinstance(meta.get("page"), int) else "?",
+            "source": os.path.basename(meta.get("source", "unknown")),
+            "snippet": doc.page_content[:200]
+        })
+    return {"answer": answer, "sources": sources}
+''',
+
+    "main.py": '''from fastapi import FastAPI, UploadFile, File, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from typing import List
+import shutil, os
+from rag import process_pdfs, answer_question
+
+app = FastAPI(
+    title="RAG Document QA System",
+    description="Upload PDFs and ask questions using a fully local RAG pipeline. No API key required.",
+    version="1.0.0"
+)
+
+templates = Jinja2Templates(directory="templates")
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+class QuestionPayload(BaseModel):
+    question: str
+    chat_history: List[dict] = []
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.post("/upload", summary="Upload PDFs", description="Upload one or more PDF files. They will be chunked, embedded, and stored in a local FAISS vector store.")
+async def upload_pdfs(files: List[UploadFile] = File(...)):
+    paths = []
+    for file in files:
+        path = os.path.join(UPLOAD_DIR, file.filename)
+        with open(path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        paths.append(path)
+    chunks = process_pdfs(paths)
+    return {"message": f"Processed {len(paths)} file(s) into {chunks} chunks."}
+
+@app.post("/ask", summary="Ask a question", description="Ask a question about the uploaded documents. Optionally pass chat_history for multi-turn conversation.")
+async def ask_question(payload: QuestionPayload):
+    if not payload.question:
+        return {"answer": "Please provide a question.", "sources": []}
+    result = answer_question(payload.question, payload.chat_history)
+    return result
+''',
+
+    "templates/index.html": '''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -113,7 +208,7 @@ async function askQuestion() {
   appendMessage("user", question, []);
 
   const askBtn = document.getElementById("askBtn");
-  askBtn.innerHTML = "<div class='spinner'></div>";
+  askBtn.innerHTML = "<div class=\'spinner\'></div>";
   askBtn.disabled = true;
 
   const thinkingId = "thinking-" + Date.now();
@@ -151,7 +246,7 @@ function appendMessage(role, text, sources, id) {
     sources.forEach(s => {
       const chip = document.createElement("div");
       chip.className = "source-chip";
-      chip.innerHTML = "<div class='source-label'>" + s.source + " — page " + s.page + "</div>" + s.snippet + "...";
+      chip.innerHTML = "<div class=\'source-label\'>" + s.source + " — page " + s.page + "</div>" + s.snippet + "...";
       srcDiv.appendChild(chip);
     });
     msg.appendChild(srcDiv);
@@ -169,3 +264,60 @@ function clearChat() {
 </script>
 </body>
 </html>
+''',
+
+    "Dockerfile": '''FROM python:3.10-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+RUN mkdir -p uploads vectorstore
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+''',
+
+    "docker-compose.yml": '''version: "3.8"
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./vectorstore:/app/vectorstore
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+''',
+
+    ".gitignore": '''venv/
+__pycache__/
+uploads/
+vectorstore/
+*.pyc
+.env
+''',
+
+    "requirements.txt": '''fastapi
+uvicorn
+python-multipart
+langchain
+langchain-community
+sentence-transformers
+faiss-cpu
+pypdf
+ollama
+jinja2
+pydantic
+'''
+}
+
+for path, content in files.items():
+    os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"Updated: {path}")
+
+print("\nAll improvements applied!")
